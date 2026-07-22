@@ -75,7 +75,7 @@ pipeline {
             }
         }
 
-        stage("Deploy (${params.TARGET_ENV})") {
+        stage("Deploy") {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding',
