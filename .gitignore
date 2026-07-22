@@ -1,0 +1,25 @@
+# Jenkins / build artifacts
+processClaims.zip
+build/
+target/
+*.zip
+
+# Local Lambda deps installed during packaging
+lambda/package/
+
+# AWS / secrets
+.env
+*.pem
+*.key
+aws-credentials.txt
+
+# macOS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Terraform state (if ever added)
+*.tfstate
+*.tfstate.backup
+.terraform/

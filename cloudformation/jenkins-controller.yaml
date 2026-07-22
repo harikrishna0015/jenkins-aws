@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Jenkins controller running on a t3.micro EC2 instance (AWS free-tier
+  eligible). Installs Jenkins + Docker + the ECS/AWS plugins via user-data,
+  opens the web UI (8080) and the inbound-agent JNLP port (50000), and
+  associates a fixed Elastic IP so the controller's address is stable.
+  Running the controller in AWS (instead of on a laptop) means ECS agents
+  reach it directly over the VPC/internet - no ngrok tunnel needed.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: claims
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the controller (use the default VPC).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: A public subnet in the selected VPC.
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access to the controller.
+  AllowedSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH to the controller. Restrict to your IP in production.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (auto-resolved via SSM).
+
+Resources:
+  # ---------------- Security Group ----------------
+  # 22  = SSH (admin access)
+  # 8080 = Jenkins web UI
+  # 50000 = inbound (JNLP) agents - ECS agents connect out to this port
+  ControllerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName} Jenkins controller
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 50000
+          ToPort: 50000
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: '-1'
+
+  # ---------------- IAM instance profile ----------------
+  # SSM-managed for optional Session Manager access + CloudWatch agent.
+  ControllerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-jenkins-controller-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  ControllerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProjectName}-jenkins-controller-profile
+      Roles:
+        - !Ref ControllerInstanceRole
+
+  # ---------------- Controller EC2 instance ----------------
+  # user-data installs Docker, the official Jenkins repo + LTS package, and the
+  # ECS + AWS Credentials plugins so the box is ready to configure on first boot.
+  ControllerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !GetAtt ControllerSG.GroupId
+      IamInstanceProfile: !Ref ControllerInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-jenkins-controller
+        - Key: Project
+          Value: !Ref ProjectName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # NOTE: no 'set -e' on purpose. A user-data script that aborts on any
+          # non-zero exit leaves the instance half-configured (e.g. Jenkins
+          # installed but never started). Each step logs its own result instead.
+          exec > >(tee -a /var/log/user-data.log) 2>&1
+          echo "=== user-data start $(date) ==="
+
+          # 1. Docker (needed later to build/push the agent image from the box).
+          dnf install -y docker || echo "WARN: docker install failed"
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          # 2. Java 21 (Jenkins LTS 2.516+ requires Java 21 minimum).
+          dnf install -y java-21-amazon-corretto-devel || echo "WARN: java install failed"
+
+          # 3. Jenkins LTS from the official repo.
+          dnf install -y wget
+          wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+          rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+          dnf install -y jenkins || echo "WARN: jenkins install failed"
+
+          # 4. Configure the inbound-agent (JNLP) listener on port 50000.
+          mkdir -p /etc/systemd/system/jenkins.service.d
+          cat > /etc/systemd/system/jenkins.service.d/override.conf <<'EOF'
+          [Service]
+          Environment="JENKINS_LISTEN_ADDRESS=0.0.0.0"
+          EOF
+
+          # 5. Start + enable Jenkins so it survives reboots.
+          systemctl daemon-reload
+          systemctl enable --now jenkins
+          echo "=== user-data done $(date); jenkins active: $(systemctl is-active jenkins) ==="
+
+  # ---------------- Elastic IP for a stable controller address ----------------
+  # Without this, a stop/start changes the public IP and every ECS agent config
+  # would need updating. The EIP is stable across reboots.
+  ControllerEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-jenkins-controller-eip
+
+  ControllerEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ControllerEIP.AllocationId
+      InstanceId: !Ref ControllerInstance
+
+Outputs:
+  ControllerPublicIp:
+    Value: !GetAtt ControllerEIP.PublicIp
+    Description: Jenkins UI at http://<this-ip>:8080 ; ECS agents connect to <this-ip>:50000.
+  ControllerPublicDns:
+    Value: !GetAtt ControllerInstance.PublicDnsName
+  JenkinsUrl:
+    Value: !Sub http://${ControllerEIP.PublicIp}:8080
+  JnlpEndpoint:
+    Value: !Sub ${ControllerEIP.PublicIp}:50000
+    Description: Use as the 'Jenkins tunnel' in the ECS cloud config.

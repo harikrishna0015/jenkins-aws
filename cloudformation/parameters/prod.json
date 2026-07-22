@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "claims"
+  },
+  {
+    "ParameterKey": "BucketName",
+    "ParameterValue": "claims-bucket-prod-CHANGEME"
+  },
+  {
+    "ParameterKey": "LambdaMemory",
+    "ParameterValue": "512"
+  },
+  {
+    "ParameterKey": "LambdaTimeout",
+    "ParameterValue": "60"
+  },
+  {
+    "ParameterKey": "LambdaArtifactKey",
+    "ParameterValue": "processClaims.zip"
+  }
+]

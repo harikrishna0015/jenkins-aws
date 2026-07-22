@@ -1,0 +1,78 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "UploadLambdaArtifacts",
+            "Effect": "Allow",
+            "Action": ["s3:PutObject", "s3:GetObject"],
+            "Resource": "arn:aws:s3:::claims-jenkins-artifacts/*"
+        },
+        {
+            "Sid": "ListArtifactBucket",
+            "Effect": "Allow",
+            "Action": ["s3:ListBucket"],
+            "Resource": "arn:aws:s3:::claims-jenkins-artifacts"
+        },
+        {
+            "Sid": "DeployCloudFormation",
+            "Effect": "Allow",
+            "Action": [
+                "cloudformation:CreateStack",
+                "cloudformation:UpdateStack",
+                "cloudformation:CreateChangeSet",
+                "cloudformation:ExecuteChangeSet",
+                "cloudformation:DescribeStacks",
+                "cloudformation:DescribeStackEvents",
+                "cloudformation:GetTemplate",
+                "cloudformation:ValidateTemplate",
+                "cloudformation:DeleteStack"
+            ],
+            "Resource": "arn:aws:cloudformation:*:*:stack/claims-*"
+        },
+        {
+            "Sid": "PassExecutionRole",
+            "Effect": "Allow",
+            "Action": ["iam:PassRole"],
+            "Resource": "arn:aws:iam::*:role/claims-cfn-execution-role",
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": "cloudformation.amazonaws.com"
+                }
+            }
+        },
+        {
+            "Sid": "RegisterEcsTaskDef",
+            "Effect": "Allow",
+            "Action": [
+                "ecs:RegisterTaskDefinition",
+                "ecs:DescribeTaskDefinition"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "EcrPush",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:GetRepositoryPolicy",
+                "ecr:DescribeRepositories",
+                "ecr:ListImages",
+                "ecr:DescribeImages",
+                "ecr:BatchGetImage",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "StsIdentity",
+            "Effect": "Allow",
+            "Action": ["sts:GetCallerIdentity"],
+            "Resource": "*"
+        }
+    ]
+}

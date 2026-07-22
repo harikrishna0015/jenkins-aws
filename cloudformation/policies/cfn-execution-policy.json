@@ -1,0 +1,36 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ManageApplicationResources",
+            "Effect": "Allow",
+            "Action": [
+                "s3:*",
+                "lambda:*",
+                "sns:*",
+                "sqs:*",
+                "logs:*",
+                "xray:*"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "ManageIamForApplication",
+            "Effect": "Allow",
+            "Action": [
+                "iam:CreateRole",
+                "iam:DeleteRole",
+                "iam:GetRole",
+                "iam:UpdateRole",
+                "iam:UpdateRoleDescription",
+                "iam:TagRole",
+                "iam:UntagRole",
+                "iam:PutRolePolicy",
+                "iam:DeleteRolePolicy",
+                "iam:GetRolePolicy",
+                "iam:PassRole"
+            ],
+            "Resource": "arn:aws:iam::*:role/claims-*"
+        }
+    ]
+}

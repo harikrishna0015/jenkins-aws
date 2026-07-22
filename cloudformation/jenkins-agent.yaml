@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Jenkins CI infrastructure (EC2 launch type): an ECS cluster backed by an
+  Auto Scaling Group of t3.micro container instances, plus an ECR repo for the
+  build-agent image and the roles needed to run containers on them.
+  EC2 launch type keeps the whole stack AWS-free-tier eligible (vs Fargate).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: claims
+    Description: Prefix for resource naming.
+  EcrRepoName:
+    Type: String
+    Default: claims/jenkins-agent
+    Description: Name of the ECR repository holding the agent image.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the ECS container instances launch (use the default VPC).
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the container instance ASG (use default-VPC subnets).
+  KeyName:
+    Type: String
+    Default: ''
+    Description: Optional EC2 key pair for SSH access to container instances (leave blank to disable SSH).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+    Description: ECS-optimized Amazon Linux 2023 AMI (auto-resolved via SSM).
+
+Resources:
+  # ---------------- ECS Cluster ----------------
+  # EC2 launch type: tasks land on the container instances in the ASG below.
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ProjectName}-jenkins-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ---------------- Security Group for container instances ----------------
+  # Outbound only - the inbound (JNLP) agent connects OUT to the controller.
+  # The instances also need egress to pull images from ECR and reach the controller.
+  ContainerInstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName} ECS container instances (Jenkins agents)
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: '-1'
+
+  # ---------------- ECR Repository ----------------
+  # Holds the Jenkins inbound-agent image (jenkins/inbound-agent + awscli).
+  AgentRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepoName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10 },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---------------- IAM: EC2 instance profile for container instances ----------------
+  # Lets each container instance register with ECS and pull from ECR + send logs.
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-ecs-instance-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProjectName}-ecs-instance-profile
+      Roles:
+        - !Ref EcsInstanceRole
+
+  # ---------------- Task Execution Role (for the agent container) ----------------
+  JenkinsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-jenkins-task-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ecr-pull
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt AgentRepository.Arn
+
+  # ---------------- Task Role (permissions inside the container) ----------------
+  # Minimal: deploy creds are injected per-build from Jenkins credentials.
+  JenkinsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-jenkins-task-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ---------------- CloudWatch Log Group for agent containers ----------------
+  JenkinsAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${ProjectName}-jenkins-agent
+      RetentionInDays: 14
+
+  # ---------------- Launch template + ASG of t3.micro container instances ----------------
+  # user-data writes ECS_CLUSTER so the instance joins our cluster, and reserves
+  # 256/256 of CPU/mem for Jenkins agent tasks (a micro is small - keep it light).
+  ContainerInstanceLT:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${ProjectName}-ecs-container-instance-lt
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Arn: !GetAtt EcsInstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt ContainerInstanceSG.GroupId
+        KeyName: !If [HasKey, !Ref KeyName, !Ref AWS::NoValue]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "ECS_CLUSTER=${EcsCluster}" >> /etc/ecs/ecs.config
+            echo "ECS_AVAILABLE_MEMORY_MIB=768" >> /etc/ecs/ecs.config
+            echo "ECS_AVAILABLE_CPU_UNITS=1024" >> /etc/ecs/ecs.config
+
+  ContainerInstanceASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${ProjectName}-ecs-jenkins-asg
+      VPCZoneIdentifier: !Ref SubnetIds
+      MinSize: '0'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ContainerInstanceLT
+        Version: !GetAtt ContainerInstanceLT.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-ecs-jenkins-container-instance
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: !Ref ProjectName
+          PropagateAtLaunch: true
+
+Conditions:
+  HasKey: !Not [!Equals [!Ref KeyName, '']]
+
+Outputs:
+  EcsClusterName:
+    Value: !Ref EcsCluster
+    Export:
+      Name: !Sub ${ProjectName}-jenkins-cluster-name
+  EcrRepositoryUri:
+    Value: !GetAtt AgentRepository.RepositoryUri
+    Description: Use this URI as the container image in the Jenkins ECS cloud config.
+  EcrRepositoryArn:
+    Value: !GetAtt AgentRepository.Arn
+  TaskExecutionRoleArn:
+    Value: !GetAtt JenkinsTaskExecutionRole.Arn
+  TaskRoleArn:
+    Value: !GetAtt JenkinsTaskRole.Arn

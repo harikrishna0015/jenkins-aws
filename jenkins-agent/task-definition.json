@@ -1,0 +1,27 @@
+{
+  "family": "claims-jenkins-agent",
+  "networkMode": "bridge",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::053849129210:role/claims-jenkins-task-exec-role",
+  "taskRoleArn": "arn:aws:iam::053849129210:role/claims-jenkins-task-role",
+  "containerDefinitions": [
+    {
+      "name": "jenkins-agent",
+      "image": "053849129210.dkr.ecr.us-east-1.amazonaws.com/claims/jenkins-agent:latest",
+      "essential": true,
+      "cpu": 256,
+      "memory": 512,
+      "memoryReservation": 384,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/claims-jenkins-agent",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "jenkins"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Healthcare Claims Processing Platform (Claritev).
+  Event-driven pipeline: S3 -> Lambda -> SNS -> SQS (Claims / Audit / Notification) + DLQ.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, qa, prod]
+    Description: Deployment environment.
+  ProjectName:
+    Type: String
+    Default: claims
+    Description: Logical project name used for resource naming.
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name for hospital claim uploads.
+  LambdaMemory:
+    Type: Number
+    Default: 256
+    MinValue: 128
+    MaxValue: 3008
+  LambdaTimeout:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 900
+  LambdaArtifactBucket:
+    Type: String
+    Description: S3 bucket where the packaged processClaims.zip is stored.
+  LambdaArtifactKey:
+    Type: String
+    Default: processClaims.zip
+
+Resources:
+  # ---------------- S3 Claims Bucket ----------------
+  ClaimsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LambdaS3InvokePermission
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacierAfter90Days
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+                  - Name: suffix
+                    Value: .csv
+            Function: !GetAtt ProcessClaimsFunction.Arn
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+                  - Name: suffix
+                    Value: .xml
+            Function: !GetAtt ProcessClaimsFunction.Arn
+
+  ClaimsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ClaimsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${ClaimsBucket}
+              - !Sub arn:aws:s3:::${ClaimsBucket}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ---------------- Lambda IAM Role ----------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-lambda-policy-${Environment}
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                # NOTE: reference the BucketName PARAMETER (not the ClaimsBucket
+                # resource) to avoid a circular dependency. ClaimsBucket DependsOn
+                # LambdaS3InvokePermission, which transitively depends on this
+                # role; referencing the parameter carries the value with no edge.
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}
+                  - !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ClaimsTopic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: '*'
+
+  # ---------------- Lambda Function ----------------
+  ProcessClaimsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-processClaims-${Environment}
+      Runtime: python3.12
+      Handler: processClaims.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !Ref LambdaMemory
+      Timeout: !Ref LambdaTimeout
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref ClaimsTopic
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+      Code:
+        S3Bucket: !Ref LambdaArtifactBucket
+        S3Key: !Ref LambdaArtifactKey
+
+  LambdaS3InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProcessClaimsFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      # Reference BucketName PARAMETER, not ClaimsBucket, to avoid the
+      # circular dependency (ClaimsBucket DependsOn this permission).
+      SourceArn: !Sub arn:aws:s3:::${BucketName}
+      SourceAccount: !Ref AWS::AccountId
+
+  # ---------------- SNS Topic ----------------
+  ClaimsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-claims-topic-${Environment}
+      KmsMasterKeyId: alias/aws/sns
+
+  # ---------------- SQS Dead Letter Queue ----------------
+  ClaimsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-claims-dlq-${Environment}
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  # ---------------- SQS Claims Queue ----------------
+  ClaimsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-claims-queue-${Environment}
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  # ---------------- SQS Audit Queue ----------------
+  AuditQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-audit-queue-${Environment}
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  # ---------------- SQS Notification Queue ----------------
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-notification-queue-${Environment}
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+
+  # ---------------- SQS Queue Policy (allow SNS publish) ----------------
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ClaimsQueue
+        - !Ref AuditQueue
+        - !Ref NotificationQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSNSPublish
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              - !GetAtt ClaimsQueue.Arn
+              - !GetAtt AuditQueue.Arn
+              - !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ClaimsTopic
+
+  # ---------------- SNS -> SQS Subscriptions ----------------
+  ClaimsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt ClaimsQueue.Arn
+      TopicArn: !Ref ClaimsTopic
+
+  AuditSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt AuditQueue.Arn
+      TopicArn: !Ref ClaimsTopic
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+      TopicArn: !Ref ClaimsTopic
+
+Outputs:
+  BucketName:
+    Value: !Ref ClaimsBucket
+    Export:
+      Name: !Sub ${ProjectName}-bucket-name-${Environment}
+  BucketArn:
+    Value: !GetAtt ClaimsBucket.Arn
+  LambdaFunctionName:
+    Value: !Ref ProcessClaimsFunction
+  LambdaFunctionArn:
+    Value: !GetAtt ProcessClaimsFunction.Arn
+  LambdaRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn
+  SNSTopicArn:
+    Value: !Ref ClaimsTopic
+  ClaimsQueueUrl:
+    Value: !Ref ClaimsQueue
+  ClaimsQueueArn:
+    Value: !GetAtt ClaimsQueue.Arn
+  AuditQueueUrl:
+    Value: !Ref AuditQueue
+  NotificationQueueUrl:
+    Value: !Ref NotificationQueue
+  DeadLetterQueueUrl:
+    Value: !Ref ClaimsDeadLetterQueue
