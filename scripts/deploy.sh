@@ -17,7 +17,7 @@ esac
 
 LAMBDA_ARTIFACT_BUCKET="${LAMBDA_ARTIFACT_BUCKET:?LAMBDA_ARTIFACT_BUCKET is required.}"
 
-STACK_NAME="claims-${ENV}"
+STACK_NAME="claims-claims-${ENV}"
 PARAM_FILE="cloudformation/parameters/${ENV}.json"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 CFN_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/claims-cfn-execution-role"
@@ -33,16 +33,26 @@ else
     ROLE_DESC="caller identity (admin)"
 fi
 
+# AWS CLI v2 dropped the file:// shorthand for --parameter-overrides; it now
+# expects space-separated Key=Value pairs. Convert the JSON param file with jq.
+if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: jq is required to parse ${PARAM_FILE} but was not found." >&2
+    exit 1
+fi
+PARAMS=$(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "${PARAM_FILE}" | tr '\n' ' ')
+
 echo "==> Deploying stack: ${STACK_NAME}"
 echo "    Region:  ${AWS_REGION:-(unset - ensure AWS_DEFAULT_REGION is exported)}"
 echo "    Deploy as: ${ROLE_DESC}"
 echo "    Artifact bucket: ${LAMBDA_ARTIFACT_BUCKET}"
+echo "    Params: ${PARAMS}"
 
+# shellcheck disable=SC2086  # intentional word-splitting of PARAMS and ROLE_FLAGS
 aws cloudformation deploy \
     --stack-name "${STACK_NAME}" \
     --template-file cloudformation/main.yaml \
     --parameter-overrides \
-        file://"${PARAM_FILE}" \
+        ${PARAMS} \
         LambdaArtifactBucket="${LAMBDA_ARTIFACT_BUCKET}" \
     --capabilities CAPABILITY_NAMED_IAM \
     ${ROLE_FLAGS} \
