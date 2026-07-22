@@ -27,10 +27,23 @@ cp lambda/processClaims.py "${STAGE_DIR}/"
 # - PIP_BREAK_SYSTEM_PACKAGES=1: bypasses PEP 668 "externally-managed-environment"
 #   on modern Debian/Ubuntu base images; harmless on older pip/other distros.
 echo "==> Installing dependencies (boto3, aws-xray-sdk) into staging dir"
-echo "    Python: $(python3 --version 2>&1)"
-echo "    PIP path: $(command -v pip3 || command -v pip)"
-PIP="$(command -v pip3 || command -v pip)"
-# Capture pip's output so we can see WHY it fails (set -e would otherwise hide it).
+
+# Find python + pip. The agent image must ship both (see jenkins-agent/Dockerfile).
+PYTHON="$(command -v python3 || command -v python || true)"
+PIP="$(command -v pip3 || command -v pip || true)"
+if [ -z "${PYTHON}" ] || [ -z "${PIP}" ]; then
+    echo "!!! Python/pip missing from agent image."
+    echo "    python: ${PYTHON:-NOT FOUND}"
+    echo "    pip:    ${PIP:-NOT FOUND}"
+    echo "    Rebuild the agent image (Dockerfile must install python3 + python3-pip)"
+    echo "    and push with a NEW tag, then re-register the task definition."
+    exit 1
+fi
+echo "    Python: $(${PYTHON} --version 2>&1)"
+echo "    PIP:    ${PIP}"
+
+# PIP_BREAK_SYSTEM_PACKAGES=1 bypasses PEP 668 on modern Debian/Ubuntu base images.
+# tee so any pip error is visible (set -e would otherwise hide it).
 if ! PIP_BREAK_SYSTEM_PACKAGES=1 ${PIP} install --upgrade --target "${STAGE_DIR}" boto3 aws-xray-sdk 2>&1 | tee /tmp/pip-install.log; then
     echo "!!! pip install FAILED. Full pip output:"
     cat /tmp/pip-install.log
