@@ -27,8 +27,15 @@ cp lambda/processClaims.py "${STAGE_DIR}/"
 # - PIP_BREAK_SYSTEM_PACKAGES=1: bypasses PEP 668 "externally-managed-environment"
 #   on modern Debian/Ubuntu base images; harmless on older pip/other distros.
 echo "==> Installing dependencies (boto3, aws-xray-sdk) into staging dir"
+echo "    Python: $(python3 --version 2>&1)"
+echo "    PIP path: $(command -v pip3 || command -v pip)"
 PIP="$(command -v pip3 || command -v pip)"
-PIP_BREAK_SYSTEM_PACKAGES=1 ${PIP} install --upgrade --target "${STAGE_DIR}" boto3 aws-xray-sdk
+# Capture pip's output so we can see WHY it fails (set -e would otherwise hide it).
+if ! PIP_BREAK_SYSTEM_PACKAGES=1 ${PIP} install --upgrade --target "${STAGE_DIR}" boto3 aws-xray-sdk 2>&1 | tee /tmp/pip-install.log; then
+    echo "!!! pip install FAILED. Full pip output:"
+    cat /tmp/pip-install.log
+    exit 1
+fi
 
 echo "==> Creating ${ZIP_FILE}"
 # Zip from inside the staging dir so paths are flat (handler at zip root).
