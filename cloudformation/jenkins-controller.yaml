@@ -1,11 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Jenkins controller running on a t3.micro EC2 instance (AWS free-tier
-  eligible). Installs Jenkins + Docker + the ECS/AWS plugins via user-data,
-  opens the web UI (8080) and the inbound-agent JNLP port (50000), and
-  associates a fixed Elastic IP so the controller's address is stable.
-  Running the controller in AWS (instead of on a laptop) means ECS agents
-  reach it directly over the VPC/internet - no ngrok tunnel needed.
+  eligible). Installs Jenkins + Docker + Git + the ECS/AWS plugins via
+  user-data, and associates a fixed Elastic IP so the controller's address
+  is stable.
+  SECURITY: the web UI (8080) and SSH (22) are restricted to your IP via
+  AllowedWebCidr / AllowedSshCidr. The JNLP port (50000) accepts only traffic
+  from the ECS container-instance security group (passed in), NOT the public
+  internet. Do NOT default these to 0.0.0.0/0 - an exposed Jenkins is a
+  top attack target and will be compromised.
 
 Parameters:
   ProjectName:
@@ -23,7 +26,17 @@ Parameters:
   AllowedSshCidr:
     Type: String
     Default: 0.0.0.0/0
-    Description: CIDR allowed to SSH to the controller. Restrict to your IP in production.
+    Description: CIDR allowed to SSH (port 22) to the controller. Set to YOUR_IP/32.
+  AllowedWebCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR allowed to reach the Jenkins web UI (8080). MUST be set to YOUR_IP/32.
+      Leaving 0.0.0.0/0 exposes Jenkins to the internet and WILL get it
+      compromised - Jenkins is a top target for attackers.
+  ContainerInstanceSG:
+    Type: String
+    Description: Security group ID of the ECS container instances (from jenkins-agent.yaml). JNLP 50000 only accepts these.
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
@@ -31,9 +44,8 @@ Parameters:
 
 Resources:
   # ---------------- Security Group ----------------
-  # 22  = SSH (admin access)
-  # 8080 = Jenkins web UI
-  # 50000 = inbound (JNLP) agents - ECS agents connect out to this port
+  # HARDENED: 22 and 8080 are IP-restricted (NOT 0.0.0.0/0); JNLP 50000 only
+  # accepts the ECS container-instance SG, not the world.
   ControllerSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -47,11 +59,12 @@ Resources:
         - IpProtocol: tcp
           FromPort: 8080
           ToPort: 8080
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref AllowedWebCidr
+        # JNLP 50000 - only from the ECS container instances, by SG reference.
         - IpProtocol: tcp
           FromPort: 50000
           ToPort: 50000
-          CidrIp: 0.0.0.0/0
+          SourceSecurityGroupId: !Ref ContainerInstanceSG
       SecurityGroupEgress:
         - CidrIp: 0.0.0.0/0
           IpProtocol: '-1'

@@ -204,3 +204,6 @@ Outputs:
     Value: !GetAtt JenkinsTaskExecutionRole.Arn
   TaskRoleArn:
     Value: !GetAtt JenkinsTaskRole.Arn
+  ContainerInstanceSG:
+    Value: !GetAtt ContainerInstanceSG.GroupId
+    Description: Pass this as ContainerInstanceSG to jenkins-controller.yaml so JNLP 50000 is locked to these instances only.
