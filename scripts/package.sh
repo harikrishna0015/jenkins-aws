@@ -22,8 +22,10 @@ cp lambda/processClaims.py "${STAGE_DIR}/"
 
 # Install runtime dependencies into the staging dir. Lambda Python 3.12 needs
 # aws_xray_sdk to be bundled (or a layer). Bundling keeps deploys self-contained.
+# Use pip3 (some images only alias pip3, not pip).
 echo "==> Installing dependencies (boto3, aws-xray-sdk) into staging dir"
-pip install --upgrade --target "${STAGE_DIR}" boto3 aws-xray-sdk -q
+PIP="$(command -v pip3 || command -v pip)"
+${PIP} install --upgrade --target "${STAGE_DIR}" boto3 aws-xray-sdk -q
 
 echo "==> Creating ${ZIP_FILE}"
 # Zip from inside the staging dir so paths are flat (handler at zip root).

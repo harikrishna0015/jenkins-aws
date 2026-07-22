@@ -12,6 +12,8 @@ FROM jenkins/inbound-agent:latest
 USER root
 
 # Install OS-level build tools, then AWS CLI v2.
+# python3 + pip are needed by package.sh to install boto3 / aws-xray-sdk into
+# the Lambda zip (those libs aren't in the Lambda Python runtime).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
@@ -20,6 +22,8 @@ RUN apt-get update \
         jq \
         git \
         ca-certificates \
+        python3 \
+        python3-pip \
     && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip" \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
@@ -27,7 +31,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Smoke-check the toolchain at build time so a broken image fails early.
-RUN aws --version && jq --version && git --version && zip --version
+RUN aws --version && jq --version && git --version && zip --version && pip3 --version
 
 # Drop back to the non-root jenkins user; the inbound entrypoint runs as it.
 USER jenkins

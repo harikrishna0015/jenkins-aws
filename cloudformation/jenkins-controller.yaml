@@ -112,6 +112,9 @@ Resources:
           systemctl enable --now docker
           usermod -aG docker ec2-user
 
+          # 1b. Git (Jenkins needs it to checkout the pipeline repo from GitHub).
+          dnf install -y git || echo "WARN: git install failed"
+
           # 2. Java 21 (Jenkins LTS 2.516+ requires Java 21 minimum).
           dnf install -y java-21-amazon-corretto-devel || echo "WARN: java install failed"
 
