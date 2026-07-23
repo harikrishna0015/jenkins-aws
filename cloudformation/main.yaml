@@ -173,7 +173,12 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub ${ProjectName}-claims-topic-${Environment}
-      KmsMasterKeyId: alias/aws/sns
+      # NOTE: KMS removed. An AWS-managed key (alias/aws/sns) CANNOT be decrypted
+      # by SQS (which uses alias/aws/sqs) - the keys are service-scoped, so SNS
+      # silently drops messages destined for encrypted SQS queues. For production,
+      # use a single Customer Managed Key (CMK) with a key policy granting both
+      # sns.amazonaws.com and sqs.amazonaws.com access, and reference it here
+      # AND on each queue.
 
   # ---------------- SQS Dead Letter Queue ----------------
   ClaimsDeadLetterQueue:
@@ -181,7 +186,7 @@ Resources:
     Properties:
       QueueName: !Sub ${ProjectName}-claims-dlq-${Environment}
       MessageRetentionPeriod: 1209600
-      KmsMasterKeyId: alias/aws/sqs
+      # KMS removed - see ClaimsTopic note. Re-add a shared CMK in production.
 
   # ---------------- SQS Claims Queue ----------------
   ClaimsQueue:
@@ -192,7 +197,6 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
         maxReceiveCount: 3
-      KmsMasterKeyId: alias/aws/sqs
 
   # ---------------- SQS Audit Queue ----------------
   AuditQueue:
@@ -203,7 +207,6 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
         maxReceiveCount: 3
-      KmsMasterKeyId: alias/aws/sqs
 
   # ---------------- SQS Notification Queue ----------------
   NotificationQueue:
@@ -214,7 +217,6 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt ClaimsDeadLetterQueue.Arn
         maxReceiveCount: 3
-      KmsMasterKeyId: alias/aws/sqs
 
   # ---------------- SQS Queue Policy (allow SNS publish) ----------------
   SQSQueuePolicy:
